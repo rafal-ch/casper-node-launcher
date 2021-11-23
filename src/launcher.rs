@@ -5,6 +5,7 @@ use std::thread;
 use std::{fs, mem, path::PathBuf, process::Command};
 
 use anyhow::{bail, Result};
+use itertools::Itertools;
 #[cfg(test)]
 use once_cell::sync::Lazy;
 use semver::Version;
@@ -102,34 +103,40 @@ impl Launcher {
     /// it will search for the latest installed version of casper-node and start running it in
     /// validator mode.
     pub fn new() -> Result<Self> {
+        let mut installed_binary_versions = utils::versions_from_path(&Self::binary_root_dir())?;
+
+        let installed_config_versions = utils::versions_from_path(&Self::config_root_dir())?;
+        if installed_binary_versions != installed_config_versions {
+            bail!(
+                "installed binary versions ({}) don't match installed configs ({})",
+                installed_binary_versions.iter().join(", "),
+                installed_config_versions.iter().join(", "),
+            );
+        }
+
         let mut launcher = Launcher {
             binary_root_dir: Self::binary_root_dir(),
             config_root_dir: Self::config_root_dir(),
             state: State::default(),
         };
 
-        let state_path = launcher.state_path();
-        if state_path.exists() {
-            debug!(path=%state_path.display(), "trying to read stored state");
-            let contents = utils::map_and_log_error(
-                fs::read_to_string(&state_path),
-                format!("failed to read {}", state_path.display()),
-            )?;
-
-            launcher.state = utils::map_and_log_error(
-                toml::from_str(&contents),
-                format!("failed to parse {}", state_path.display()),
-            )?;
-            info!(path=%state_path.display(), "read stored state");
-            return Ok(launcher);
+        let newest_version = installed_binary_versions.pop();
+        if let Some(newest_version) = newest_version {
+            let previous_version = installed_binary_versions.pop();
+            match previous_version {
+                Some(previous_version) => {
+                    launcher.state = State::MigrateData {
+                        old_info: launcher.new_node_info(previous_version),
+                        new_info: launcher.new_node_info(newest_version),
+                    };
+                }
+                None => {
+                    launcher.state =
+                        State::RunNodeAsValidator(launcher.new_node_info(newest_version));
+                }
+            }
         }
 
-        debug!(path=%state_path.display(), "stored state doesn't exist");
-
-        let version = launcher.next_installed_version(&Version::new(0, 0, 0))?;
-        let node_info = launcher.new_node_info(version);
-        launcher.state = State::RunNodeAsValidator(node_info);
-        launcher.write()?;
         Ok(launcher)
     }
 
@@ -455,60 +462,6 @@ mod tests {
     }
 
     #[test]
-    fn should_write_state_on_first_run() {
-        let _ = logging::init();
-
-        install_mock(&*V1, true);
-        let launcher = Launcher::new().unwrap();
-        assert!(launcher.state_path().exists());
-
-        // Check the state was stored to disk.
-        let toml_contents = fs::read_to_string(&launcher.state_path()).unwrap();
-        let stored_state = toml::from_str(&toml_contents).unwrap();
-        assert_eq!(launcher.state, stored_state);
-
-        // Check the stored state is as expected.
-        let expected_node_info = launcher.new_node_info(V1.clone());
-        let expected_state = State::RunNodeAsValidator(expected_node_info);
-        assert_eq!(expected_state, stored_state);
-    }
-
-    #[test]
-    fn should_read_state_on_startup() {
-        let _ = logging::init();
-
-        // Write the state to disk (RunNodeAsValidator for V1).
-        install_mock(&*V1, true);
-        let _ = Launcher::new().unwrap();
-
-        // Install a new version of node, but ensure a new launcher reads the state from disk rather
-        // than detecting a new version.
-        install_mock(&*V2, true);
-        let launcher = Launcher::new().unwrap();
-
-        let expected_node_info = launcher.new_node_info(V1.clone());
-        let expected_state = State::RunNodeAsValidator(expected_node_info);
-        assert_eq!(expected_state, launcher.state);
-    }
-
-    #[test]
-    fn should_error_if_state_corrupted() {
-        let _ = logging::init();
-
-        // Write the state to disk (RunNodeAsValidator for V1).
-        install_mock(&*V1, true);
-        let launcher = Launcher::new().unwrap();
-
-        // Corrupt the stored state.
-        fs::write(&launcher.state_path(), "bad value".as_bytes()).unwrap();
-        let error = Launcher::new().unwrap_err().to_string();
-        assert_eq!(
-            format!("failed to parse {}", launcher.state_path().display()),
-            error
-        );
-    }
-
-    #[test]
     fn should_error_if_node_not_installed_on_first_run() {
         let _ = logging::init();
 
@@ -523,7 +476,39 @@ mod tests {
     }
 
     #[test]
-    fn should_run_upgrades() {
+    fn should_run_upgrade() {
+        let _ = logging::init();
+
+        // Set up the test folders as if casper-node has just been installed at v2.0.0.
+        install_mock(&*V1, true);
+        install_mock(&*V2, true);
+
+        let mut launcher = Launcher::new().unwrap();
+        // Run the launcher's first step - should run node v2.0.0 in data-migration mode.
+        launcher.step().unwrap();
+        assert_last_log_line_eq(&launcher, "Node v2.0.0 migrated data");
+
+        // Install next version of the node
+        install_mock(&*V3, true);
+
+        // Run the launcher's second step - should run node v2.0.0 in validator mode.
+        launcher.step().unwrap();
+        assert_last_log_line_eq(&launcher, "Node v2.0.0 ran as validator");
+
+        // Run the launcher's third step - should run node v3.0.0 in data-migration mode.
+        launcher.step().unwrap();
+        assert_last_log_line_eq(&launcher, "Node v3.0.0 migrated data");
+
+        // Run the launcher's fourth and last step - should run node v3.0.0 in validator mode.  As there
+        // will be no further upgraded binary available after the node exits, the step should return
+        // an error.
+        let error = launcher.step().unwrap_err().to_string();
+        assert_last_log_line_eq(&launcher, "Node v3.0.0 ran as validator");
+        assert_eq!("no higher version than current 3.0.0 installed", error);
+    }
+
+    #[test]
+    fn should_upgrade_and_run_latest_node() {
         let _ = logging::init();
 
         // Set up the test folders as if casper-node has just been installed at v3.0.0.
@@ -532,28 +517,34 @@ mod tests {
         install_mock(&*V3, true);
 
         let mut launcher = Launcher::new().unwrap();
-        // Run the launcher's first step - should run node v1.0.0 in validator mode.
-        launcher.step().unwrap();
-        assert_last_log_line_eq(&launcher, "Node v1.0.0 ran as validator");
-
-        // Run the launcher's second step - should run node v2.0.0 in data-migration mode.
-        launcher.step().unwrap();
-        assert_last_log_line_eq(&launcher, "Node v2.0.0 migrated data");
-
-        // Run the launcher's third step - should run node v2.0.0 in validator mode.
-        launcher.step().unwrap();
-        assert_last_log_line_eq(&launcher, "Node v2.0.0 ran as validator");
-
-        // Run the launcher's fourth step - should run node v3.0.0 in data-migration mode.
+        // Run the launcher's first step - should run node v3.0.0 in data-migration mode.
         launcher.step().unwrap();
         assert_last_log_line_eq(&launcher, "Node v3.0.0 migrated data");
 
-        // Run the launcher's fifth step - should run node v3.0.0 in validator mode.  As there
+        // Run the launcher's second and last step - should run node v3.0.0 in validator mode.  As there
         // will be no further upgraded binary available after the node exits, the step should return
         // an error.
         let error = launcher.step().unwrap_err().to_string();
         assert_last_log_line_eq(&launcher, "Node v3.0.0 ran as validator");
         assert_eq!("no higher version than current 3.0.0 installed", error);
+    }
+
+    #[test]
+    fn should_not_run_upgrade() {
+        let _ = logging::init();
+
+        // Set up the test folders as if casper-node has just been installed at v1.0.0.
+        // No other versions should be available.
+        install_mock(&*V1, true);
+
+        let mut launcher = Launcher::new().unwrap();
+
+        // Run the launcher's first and only step - should run node v1.0.0 in validator mode.  As there
+        // will be no further upgraded binary available after the node exits, the step should return
+        // an error.
+        let error = launcher.step().unwrap_err().to_string();
+        assert_last_log_line_eq(&launcher, "Node v1.0.0 ran as validator");
+        assert_eq!("no higher version than current 1.0.0 installed", error);
     }
 
     #[test]
@@ -728,17 +719,27 @@ mod tests {
         let _ = logging::init();
 
         install_mock(&*V1, true);
-        // Rename the config folder to 2_0_0.
+        install_mock(&*V2, true);
+        install_mock(&*V3, true);
+        // Rename config folders to emulate the difference.
         fs::rename(
             Launcher::config_root_dir().join("1_0_0"),
-            Launcher::config_root_dir().join("2_0_0"),
+            Launcher::config_root_dir().join("2_0_1"),
         )
         .unwrap();
 
         let error = Launcher::new().unwrap_err().to_string();
         assert_eq!(
-            "next binary version 1.0.0 != next config version 2.0.0",
+            "installed binary versions (1.0.0, 2.0.0, 3.0.0) don't match installed configs (2.0.0, 2.0.1, 3.0.0)",
             error
         );
+    }
+
+    #[test]
+    fn should_error_if_no_versions_are_installed() {
+        let _ = logging::init();
+
+        let error = Launcher::new().unwrap_err().to_string();
+        assert!(error.contains("failed to get a valid version from subdirs"));
     }
 }

@@ -56,7 +56,7 @@ pub fn previous_installed_version(dir: &Path, current_version: &Version) -> Resu
     Ok(previous_version)
 }
 
-fn versions_from_path(dir: &Path) -> Result<Vec<Version>> {
+pub(crate) fn versions_from_path(dir: &Path) -> Result<Vec<Version>> {
     let mut versions = vec![];
 
     for entry in map_and_log_error(
@@ -91,6 +91,9 @@ fn versions_from_path(dir: &Path) -> Result<Vec<Version>> {
         warn!("{}", msg);
         bail!(msg);
     }
+
+    // TODO[RC]: BTreeSet?
+    versions.sort();
 
     Ok(versions)
 }
@@ -256,5 +259,31 @@ mod tests {
         let mut command = Command::new("sh");
         command.arg(&script_path);
         assert_eq!(run_node(command).unwrap(), NodeExitCode::ShouldDowngrade);
+    }
+
+    #[test]
+    fn should_read_versions_from_dir() {
+        let tempdir = tempfile::tempdir().expect("should create temp dir");
+        fs::create_dir(tempdir.path().join("1_0_0")).unwrap();
+        fs::create_dir(tempdir.path().join("2_0_0")).unwrap();
+        fs::create_dir(tempdir.path().join("3_0_0")).unwrap();
+        fs::create_dir(tempdir.path().join("3_0_0_0")).unwrap();
+        fs::create_dir(tempdir.path().join("3_A")).unwrap();
+        fs::create_dir(tempdir.path().join("2_0_1")).unwrap();
+        fs::create_dir(tempdir.path().join("1_0_9145")).unwrap();
+        fs::create_dir(tempdir.path().join("1_454875135649876544411657897987_9145")).unwrap();
+
+        // Should return in ascending order
+        let expected_version = vec![
+            Version::new(1, 0, 0),
+            Version::new(1, 0, 9145),
+            Version::new(2, 0, 0),
+            Version::new(2, 0, 1),
+            Version::new(3, 0, 0),
+        ];
+
+        let versions = versions_from_path(tempdir.path()).unwrap();
+
+        assert_eq!(expected_version, versions);
     }
 }

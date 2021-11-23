@@ -22,6 +22,7 @@ signal-hook = "0.3.4"
 toml = "0.5.8"
 tracing = "0.1.22"
 tracing-subscriber = { version = "0.2.15", features = ["json"] }
+itertools = "0.10.1"
 
 [dev-dependencies]
 once_cell = "1.5.2"
