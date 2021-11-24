@@ -1,4 +1,6 @@
-use std::{fs, path::Path, process::Command, str::FromStr, sync::atomic::Ordering};
+use std::{
+    collections::BTreeSet, fs, path::Path, process::Command, str::FromStr, sync::atomic::Ordering,
+};
 
 use anyhow::{bail, Error, Result};
 use semver::Version;
@@ -56,8 +58,8 @@ pub fn previous_installed_version(dir: &Path, current_version: &Version) -> Resu
     Ok(previous_version)
 }
 
-pub(crate) fn versions_from_path(dir: &Path) -> Result<Vec<Version>> {
-    let mut versions = vec![];
+pub(crate) fn versions_from_path(dir: &Path) -> Result<BTreeSet<Version>> {
+    let mut versions = BTreeSet::new();
 
     for entry in map_and_log_error(
         fs::read_dir(dir),
@@ -80,7 +82,7 @@ pub(crate) fn versions_from_path(dir: &Path) -> Result<Vec<Version>> {
             }
         };
 
-        versions.push(version);
+        versions.insert(version);
     }
 
     if versions.is_empty() {
@@ -91,9 +93,6 @@ pub(crate) fn versions_from_path(dir: &Path) -> Result<Vec<Version>> {
         warn!("{}", msg);
         bail!(msg);
     }
-
-    // TODO[RC]: BTreeSet?
-    versions.sort();
 
     Ok(versions)
 }
@@ -274,13 +273,16 @@ mod tests {
         fs::create_dir(tempdir.path().join("1_454875135649876544411657897987_9145")).unwrap();
 
         // Should return in ascending order
-        let expected_version = vec![
+        let expected_version: BTreeSet<Version> = [
             Version::new(1, 0, 0),
             Version::new(1, 0, 9145),
             Version::new(2, 0, 0),
             Version::new(2, 0, 1),
             Version::new(3, 0, 0),
-        ];
+        ]
+        .iter()
+        .cloned()
+        .collect();
 
         let versions = versions_from_path(tempdir.path()).unwrap();
 

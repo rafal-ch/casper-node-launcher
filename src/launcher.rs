@@ -103,9 +103,9 @@ impl Launcher {
     /// it will search for the latest installed version of casper-node and start running it in
     /// validator mode.
     pub fn new() -> Result<Self> {
-        let mut installed_binary_versions = utils::versions_from_path(&Self::binary_root_dir())?;
-
+        let installed_binary_versions = utils::versions_from_path(&Self::binary_root_dir())?;
         let installed_config_versions = utils::versions_from_path(&Self::config_root_dir())?;
+
         if installed_binary_versions != installed_config_versions {
             bail!(
                 "installed binary versions ({}) don't match installed configs ({})",
@@ -120,9 +120,10 @@ impl Launcher {
             state: State::default(),
         };
 
-        let newest_version = installed_binary_versions.pop();
+        let mut versions_iter = installed_binary_versions.into_iter().rev();
+        let newest_version = versions_iter.next();
         if let Some(newest_version) = newest_version {
-            let previous_version = installed_binary_versions.pop();
+            let previous_version = versions_iter.next();
             match previous_version {
                 Some(previous_version) => {
                     launcher.state = State::MigrateData {
